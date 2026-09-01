@@ -1,0 +1,2076 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Maddongi' — Menjaga Padi dari Burung</title>
+  <!-- Tailwind CSS & Google Fonts -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #06110a;
+      font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    }
+    #canvas-container {
+      width: 100vw;
+      height: 100vh;
+      position: absolute;
+      top: 0;
+      left: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: #06110a;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Plus+Jakarta+Sans:wght@500;700;800&display=swap');
+  </style>
+</head>
+<body>
+  <div id="canvas-container">
+    <canvas id="gameCanvas"></canvas>
+  </div>
+
+  <script>
+  /**
+   * ============================================================================
+   * GAME MADDONGI' (v2.3 - Bug Fixed & Mobile Optimized Edition)
+   * Berdasarkan PRD v2, Task Kualitas Kode v2, & Task Upgrade Visual HD
+   * Model Padi HD Rumpun Emas Lengkung dengan Penanganan Status Kerusakan
+   * ============================================================================
+   */
+
+  // Canvas roundRect Polyfill for Older Mobile WebViews
+  if (!CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+      if (w < 2 * r) r = w / 2;
+      if (h < 2 * r) r = h / 2;
+      this.beginPath();
+      this.moveTo(x + r, y);
+      this.arcTo(x + w, y, x + w, y + h, r);
+      this.arcTo(x + w, y + h, x, y + h, r);
+      this.arcTo(x, y + h, x, y, r);
+      this.arcTo(x, y, x + w, y, r);
+      this.closePath();
+      return this;
+    };
+  }
+
+  // ==========================================
+  // 1. CONFIG MODULE (Data-Driven Specifications)
+  // ==========================================
+  const GameConfig = {
+    DESIGN_WIDTH: 1920,
+    DESIGN_HEIGHT: 1080,
+    GAME_DURATION_SEC: 180, // 3 Menit (0-60s Sore, 60-120s Malam, 120-180s Siang)
+    INITIAL_POTENTIAL_TONS: [3.0, 3.0, 4.0], // Total 10.0 Ton
+    TOTAL_INITIAL_TONS: 10.0,
+    EAT_RATE_PER_SEC: 0.045, // Ton padi berkurang per detik saat burung memakan
+    FARMER_SPEED: 380, // Kecepatan gerak karakter di pematang
+    PONDOK_RADIUS: 90 // Toleransi jarak agar karakter dianggap di Pondok Sawah
+  };
+
+  const BirdConfig = {
+    BLUE: {
+      id: 'blue',
+      name: 'Burung Pipit Biru',
+      tapsRequired: 2,
+      flockMin: 3,
+      flockMax: 5,
+      tool: 'rope',
+      bodyColor: '#2563eb',
+      wingColor: '#1d4ed8',
+      bellyColor: '#93c5fd',
+      beakColor: '#f59e0b',
+      eatRateMultiplier: 1.0,
+      description: 'Goyang Tali 2x dari Pondok'
+    },
+    RED: {
+      id: 'red',
+      name: 'Burung Kepala Merah',
+      tapsRequired: 3,
+      flockMin: 3,
+      flockMax: 5,
+      tool: 'rope',
+      bodyColor: '#dc2626',
+      wingColor: '#991b1b',
+      bellyColor: '#fca5a5',
+      beakColor: '#fbbf24',
+      eatRateMultiplier: 1.25,
+      description: 'Goyang Tali 3x dari Pondok'
+    },
+    BLACK: {
+      id: 'black',
+      name: 'Kawanan Gagak Hitam',
+      tapsRequired: null,
+      flockMin: 6,
+      flockMax: 9,
+      tool: 'flag',
+      bodyColor: '#1f2937',
+      wingColor: '#111827',
+      bellyColor: '#374151',
+      beakColor: '#9ca3af',
+      eatRateMultiplier: 1.6,
+      description: 'Dekati ke Pematang & Kibas Bendera'
+    }
+  };
+
+  const SpawnConfig = {
+    INITIAL_DELAY_SEC: 4.0,
+    MIN_INTERVAL_SEC: 5.0,
+    MAX_INTERVAL_SEC: 10.0,
+    DISTRIBUTION: [
+      { type: 'BLUE', weight: 0.40 },
+      { type: 'RED', weight: 0.30 },
+      { type: 'BLACK', weight: 0.30 }
+    ],
+    DIFFICULTY_RAMP_TIME_SEC: 120
+  };
+
+  const ScoreConfig = {
+    HARVEST_MULTIPLIER: 100,
+    BIRD_REPELLED_MULTIPLIER: 10
+  };
+
+  // ==========================================
+  // 2. PROCEDURAL SOUND SYNTHESIZER (Web Audio API)
+  // 100% Offline, Zero External Asset Dependencies
+  // ==========================================
+  class SoundSynthesizer {
+    constructor() {
+      this.ctx = null;
+      this.isMuted = false;
+      this.bgmPlaying = false;
+      this.bgmInterval = null;
+    }
+
+    init() {
+      if (!this.ctx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        this.ctx = new AudioContext();
+      }
+      if (this.ctx.state === 'suspended') {
+        this.ctx.resume();
+      }
+      // Memastikan BGM berlanjut jika telah dinyalakan sebelum gesture pertama
+      if (this.bgmPlaying && !this.bgmInterval && !this.isMuted) {
+        this.startBGM();
+      }
+    }
+
+    toggleMute() {
+      this.isMuted = !this.isMuted;
+      if (this.isMuted && this.bgmInterval) {
+        clearInterval(this.bgmInterval);
+        this.bgmInterval = null;
+      } else if (!this.isMuted && this.bgmPlaying) {
+        this.startBGM();
+      }
+      return this.isMuted;
+    }
+
+    // Suara Kaleng Rombeng Klotok-Klotok Sawah
+    playRopeShake() {
+      if (this.isMuted || !this.ctx) return;
+      const now = this.ctx.currentTime;
+      for (let i = 0; i < 4; i++) {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        const filter = this.ctx.createBiquadFilter();
+
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(340 + Math.random() * 260, now + i * 0.05);
+        osc.frequency.exponentialRampToValueAtTime(70, now + i * 0.05 + 0.09);
+
+        filter.type = 'bandpass';
+        filter.frequency.value = 1300;
+
+        gain.gain.setValueAtTime(0.35, now + i * 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.05 + 0.1);
+
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(this.ctx.destination);
+
+        osc.start(now + i * 0.05);
+        osc.stop(now + i * 0.05 + 0.12);
+      }
+    }
+
+    // Suara Kibasan Bendera (Whoosh)
+    playFlagSwish() {
+      if (this.isMuted || !this.ctx) return;
+      const now = this.ctx.currentTime;
+      const bufferSize = this.ctx.sampleRate * 0.22;
+      const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = buffer;
+
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(450, now);
+      filter.frequency.linearRampToValueAtTime(1600, now + 0.09);
+      filter.frequency.linearRampToValueAtTime(250, now + 0.22);
+
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.45, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.22);
+
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.ctx.destination);
+
+      noise.start(now);
+    }
+
+    // Suara Burung Kaget & Terbang
+    playBirdFly() {
+      if (this.isMuted || !this.ctx) return;
+      const now = this.ctx.currentTime;
+      for (let i = 0; i < 3; i++) {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        const startFreq = 1700 + Math.random() * 500;
+        osc.frequency.setValueAtTime(startFreq, now + i * 0.06);
+        osc.frequency.linearRampToValueAtTime(startFreq + 600, now + i * 0.06 + 0.04);
+        osc.frequency.linearRampToValueAtTime(startFreq - 200, now + i * 0.06 + 0.08);
+
+        gain.gain.setValueAtTime(0.2, now + i * 0.06);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.06 + 0.09);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now + i * 0.06);
+        osc.stop(now + i * 0.06 + 0.1);
+      }
+    }
+
+    // Suara Peringatan Burung Datang
+    playAlert() {
+      if (this.isMuted || !this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.14);
+
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.24);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.25);
+    }
+
+    // Suara Klik UI & Tombol
+    playClick() {
+      if (this.isMuted || !this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(650, now);
+      osc.frequency.exponentialRampToValueAtTime(950, now + 0.04);
+      gain.gain.setValueAtTime(0.22, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.06);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.07);
+    }
+
+    // Suara Peringatan Petani Belum di Pondok
+    playWarning() {
+      if (this.isMuted || !this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, now);
+      osc.frequency.linearRampToValueAtTime(180, now + 0.15);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.16);
+    }
+
+    // Suara Kemenangan Panen
+    playVictory() {
+      if (this.isMuted || !this.ctx) return;
+      const notes = [523.25, 659.25, 783.99, 1046.50];
+      notes.forEach((freq, idx) => {
+        const now = this.ctx.currentTime + idx * 0.15;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, now);
+        gain.gain.setValueAtTime(0.28, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.5);
+      });
+    }
+
+    // Suara Kekalahan Gagal Panen
+    playDefeat() {
+      if (this.isMuted || !this.ctx) return;
+      const notes = [380, 320, 260, 190];
+      notes.forEach((freq, idx) => {
+        const now = this.ctx.currentTime + idx * 0.22;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, now);
+        gain.gain.setValueAtTime(0.22, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.42);
+      });
+    }
+
+    // Musik Latar Pentatonik Tradisional Bugis (Kecapi & Suling)
+    startBGM() {
+      this.bgmPlaying = true;
+      if (this.isMuted || !this.ctx || this.bgmInterval) return;
+      const pentatonic = [220, 247.5, 275, 330, 366.6, 440, 495, 550];
+      let step = 0;
+
+      this.bgmInterval = setInterval(() => {
+        if (this.isMuted || !this.ctx) return;
+        const now = this.ctx.currentTime;
+        
+        // Petikan Kecapi
+        const note = pentatonic[step % pentatonic.length];
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(note, now);
+        gain.gain.setValueAtTime(0.065, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.65);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.7);
+
+        // Dentum Bambu Ritmis
+        if (step % 4 === 0) {
+          const bassOsc = this.ctx.createOscillator();
+          const bassGain = this.ctx.createGain();
+          bassOsc.type = 'sine';
+          bassOsc.frequency.setValueAtTime(110, now);
+          bassOsc.frequency.exponentialRampToValueAtTime(55, now + 0.3);
+          bassGain.gain.setValueAtTime(0.08, now);
+          bassGain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+          bassOsc.connect(bassGain);
+          bassGain.connect(this.ctx.destination);
+          bassOsc.start(now);
+          bassOsc.stop(now + 0.4);
+        }
+
+        step = (step + 1) % 16;
+      }, 440);
+    }
+
+    stopBGM() {
+      this.bgmPlaying = false;
+      if (this.bgmInterval) {
+        clearInterval(this.bgmInterval);
+        this.bgmInterval = null;
+      }
+    }
+  }
+
+  const AudioManager = new SoundSynthesizer();
+
+  // ==========================================
+  // 3. GAME STATE MANAGER
+  // ==========================================
+  class GameStateManager {
+    constructor() {
+      this.reset();
+    }
+
+    reset() {
+      this.timeRemaining = GameConfig.GAME_DURATION_SEC;
+      this.plotPotentials = [...GameConfig.INITIAL_POTENTIAL_TONS]; // [3.0, 3.0, 4.0]
+      this.initialTotalTons = GameConfig.TOTAL_INITIAL_TONS;
+      this.isGameOver = false;
+      this.isVictory = false;
+      this.isPaused = false;
+      this.repelledCounts = {
+        blue: 0,
+        red: 0,
+        black: 0
+      };
+      this.activeFlocks = [];
+      this.warningMessage = "";
+      this.warningTimer = 0;
+      this.shakeAnimations = [0, 0, 0]; // Nilai waktu getar tali per petak (0..1)
+    }
+
+    getTotalRemainingTons() {
+      const sum = this.plotPotentials.reduce((a, b) => a + Math.max(0, b), 0);
+      return Math.max(0, Math.round(sum * 100) / 100);
+    }
+
+    getTotalEatenTons() {
+      const eaten = this.initialTotalTons - this.getTotalRemainingTons();
+      return Math.max(0, Math.round(eaten * 100) / 100);
+    }
+
+    getTotalRepelledBirds() {
+      return this.repelledCounts.blue + this.repelledCounts.red + this.repelledCounts.black;
+    }
+
+    calculateFinalScore() {
+      const remainingTons = this.getTotalRemainingTons();
+      const repelledBirds = this.getTotalRepelledBirds();
+      return Math.round((remainingTons * ScoreConfig.HARVEST_MULTIPLIER) + (repelledBirds * ScoreConfig.BIRD_REPELLED_MULTIPLIER));
+    }
+
+    damagePlot(plotIndex, amount) {
+      if (this.isGameOver || this.isPaused) return;
+      this.plotPotentials[plotIndex] = Math.max(0, this.plotPotentials[plotIndex] - amount);
+      if (this.getTotalRemainingTons() <= 0) {
+        this.plotPotentials = [0, 0, 0];
+        this.isGameOver = true;
+        this.isVictory = false;
+      }
+    }
+  }
+
+  const GlobalState = new GameStateManager();
+
+  // ==========================================
+  // HIGH-PERFORMANCE OFFSCREEN SPRITE CACHE (60 FPS OPTIMIZATION)
+  // Caches heavy vector paddy clump paths to lightning-fast offscreen textures
+  // ==========================================
+  class RiceClumpCacheManager {
+    constructor() {
+      this.cache = new Map();
+    }
+
+    getClumpCanvas(stage, healthRatio, sway) {
+      // Kuantisasi parameter agar hit-rate cache maksimal & animasi tetap mulus
+      const hKey = Math.round(healthRatio * 5) / 5; // step 0.2 (0, 0.2, 0.4, 0.6, 0.8, 1.0)
+      const sKey = Math.round(sway * 2) / 2;       // step 0.5px sway (-6.0 s/d +6.0)
+      const key = `${stage}_${hKey}_${sKey}`;
+
+      if (this.cache.has(key)) {
+        return this.cache.get(key);
+      }
+
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = 150;
+      offCanvas.height = 160;
+      const offCtx = offCanvas.getContext('2d');
+
+      this.renderVectorClumpToCtx(offCtx, 75, 145, sKey, stage, hKey);
+
+      this.cache.set(key, offCanvas);
+      return offCanvas;
+    }
+
+    renderVectorClumpToCtx(ctx, x, y, sway, stage, healthRatio) {
+      ctx.save();
+      ctx.translate(x + sway * 0.4, y);
+
+      // Warna Daun Hijau
+      const leafColorMain = stage < 2 ? '#22c55e' : '#16a34a';
+      const leafColorLight = stage < 2 ? '#4ade80' : '#22c55e';
+      const leafColorDark = stage < 2 ? '#15803d' : (healthRatio < 0.3 ? '#854d0e' : '#14532d');
+      
+      // Warna Bulir Padi Emas
+      const grainColorMain = stage === 0 ? '#4ade80' : (stage === 1 ? '#a3e635' : '#eab308');
+      const grainColorHighlight = stage === 0 ? '#86efac' : (stage === 1 ? '#fde047' : '#fef08a');
+      const grainColorDark = stage === 0 ? '#16a34a' : (stage === 1 ? '#65a30d' : '#ca8a04');
+
+      const scale = 0.58 + stage * 0.10;
+
+      // 1. PANGKAL BATANG PADI (Root Base)
+      ctx.fillStyle = leafColorDark;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 5 * scale, 3 * scale, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 2. DAUN HIJAU TEGAK RUNCING
+      const leaves = [
+        { dx: -22, h: 65, curve: -16, col: leafColorDark },
+        { dx: -14, h: 82, curve: -8, col: leafColorMain },
+        { dx: -6, h: 96, curve: -3, col: leafColorLight },
+        { dx: 0, h: 106, curve: 0, col: leafColorLight },
+        { dx: 6, h: 94, curve: 4, col: leafColorMain },
+        { dx: 15, h: 80, curve: 12, col: leafColorDark },
+        { dx: 24, h: 62, curve: 20, col: leafColorDark }
+      ];
+
+      leaves.forEach(l => {
+        ctx.fillStyle = l.col;
+        ctx.beginPath();
+        ctx.moveTo(l.dx * scale * 0.3, 0);
+        ctx.quadraticCurveTo((l.dx + l.curve * 0.5) * scale + sway * 0.3, -l.h * scale * 0.5, (l.dx + l.curve) * scale + sway * 0.5, -l.h * scale);
+        ctx.quadraticCurveTo((l.dx * 0.5 + l.curve * 0.3) * scale + sway * 0.2, -l.h * scale * 0.4, (l.dx + 3) * scale * 0.3, 0);
+        ctx.closePath();
+        ctx.fill();
+      });
+
+      // 3. MALAI PADI EMAS MELENGKUNG INDAH
+      const panicles = [
+        { startX: -4, archX: -32, archY: -68, endX: -42, endY: -32, grains: 9 },
+        { startX: -2, archX: -22, archY: -82, endX: -32, endY: -42, grains: 11 },
+        { startX: 0, archX: -8, archY: -92, endX: -18, endY: -52, grains: 12 },
+        { startX: 2, archX: 10, archY: -90, endX: 20, endY: -50, grains: 12 },
+        { startX: 4, archX: 26, archY: -78, endX: 36, endY: -38, grains: 10 },
+        { startX: 6, archX: 36, archY: -64, endX: 44, endY: -28, grains: 8 }
+      ];
+
+      const visiblePaniclesCount = Math.ceil(panicles.length * healthRatio);
+
+      for (let pIdx = 0; pIdx < visiblePaniclesCount; pIdx++) {
+        const pan = panicles[pIdx];
+        const sx = pan.startX * scale;
+        const ax = (pan.archX + sway * 0.8) * scale;
+        const ay = pan.archY * scale;
+        const ex = (pan.endX + sway * 1.2) * scale;
+        const ey = pan.endY * scale;
+
+        ctx.strokeStyle = grainColorDark;
+        ctx.lineWidth = 1.8 * scale;
+        ctx.beginPath();
+        ctx.moveTo(sx, 0);
+        ctx.quadraticCurveTo(ax, ay, ex, ey);
+        ctx.stroke();
+
+        const activeGrains = Math.ceil(pan.grains * healthRatio);
+        for (let g = 1; g <= activeGrains; g++) {
+          const t = g / pan.grains;
+          const gx = (1 - t) * (1 - t) * sx + 2 * (1 - t) * t * ax + t * t * ex;
+          const gy = (1 - t) * (1 - t) * 0 + 2 * (1 - t) * t * ay + t * t * ey;
+
+          const tx = 2 * (1 - t) * (ax - sx) + 2 * t * (ex - ax);
+          const ty = 2 * (1 - t) * (ay - 0) + 2 * t * (ey - ay);
+          const angle = Math.atan2(ty, tx);
+
+          ctx.save();
+          ctx.translate(gx, gy);
+          ctx.rotate(angle);
+
+          ctx.fillStyle = grainColorDark;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 4.2 * scale, 2.4 * scale, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = grainColorMain;
+          ctx.beginPath();
+          ctx.ellipse(-0.3, -0.3, 3.8 * scale, 2.1 * scale, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = grainColorHighlight;
+          ctx.beginPath();
+          ctx.ellipse(-0.8, -0.6, 2.0 * scale, 1.0 * scale, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.restore();
+        }
+      }
+
+      ctx.restore();
+    }
+  }
+
+  const PaddyCache = new RiceClumpCacheManager();
+
+  // ==========================================
+  // 4. COLOR & DAYLIGHT INTERPOLATION SYSTEM
+  // Smoothly blends Sore -> Malam -> Siang over 180s
+  // ==========================================
+  class LightingSystem {
+    // Utility Color Interpolator
+    static lerpColor(c1, c2, t) {
+      t = Math.max(0, Math.min(1, t));
+      return {
+        r: Math.round(c1.r + (c2.r - c1.r) * t),
+        g: Math.round(c1.g + (c2.g - c1.g) * t),
+        b: Math.round(c1.b + (c2.b - c1.b) * t)
+      };
+    }
+
+    static colorToRgbString(c, a = 1.0) {
+      return `rgba(${c.r}, ${c.g}, ${c.b}, ${a})`;
+    }
+
+    // Mengembalikan status waktu dan parameter warna langit/cahaya
+    static getDaylightParameters(timeRemaining) {
+      const elapsed = GameConfig.GAME_DURATION_SEC - timeRemaining;
+      const progress = Math.max(0, Math.min(1, elapsed / GameConfig.GAME_DURATION_SEC));
+
+      let tPhase = 0;
+      let phaseName = "";
+      let skyTop, skyMid, skyBottom, mountainColor, hillColor, soilLight, ambientTint, starsAlpha, sunMoon;
+
+      if (progress < 0.33) {
+        // --- FASE 1: SORE / SENJA (0 - 60s) ---
+        tPhase = progress / 0.33;
+        phaseName = "Sore Hari (Senja)";
+        skyTop = this.lerpColor({ r: 234, g: 88, b: 12 }, { r: 59, g: 7, b: 100 }, tPhase);
+        skyMid = this.lerpColor({ r: 249, g: 115, b: 22 }, { r: 157, g: 23, b: 77 }, tPhase);
+        skyBottom = this.lerpColor({ r: 254, g: 215, b: 170 }, { r: 244, g: 114, b: 182 }, tPhase);
+        mountainColor = this.lerpColor({ r: 124, g: 45, b: 18 }, { r: 49, g: 16, b: 66 }, tPhase);
+        hillColor = this.lerpColor({ r: 77, g: 124, b: 15 }, { r: 30, g: 60, b: 25 }, tPhase);
+        soilLight = this.lerpColor({ r: 83, g: 66, b: 42 }, { r: 45, g: 35, b: 24 }, tPhase);
+        ambientTint = { r: 255, g: 180, b: 100, a: (1 - tPhase) * 0.18 + tPhase * 0.08 };
+        starsAlpha = tPhase * 0.4;
+        
+        // Sun setting
+        sunMoon = {
+          type: 'sun',
+          xRatio: 0.82 - tPhase * 0.15,
+          yRatio: 0.18 + tPhase * 0.22,
+          radius: 38,
+          glowColor: 'rgba(255, 200, 100, ',
+          glowRadius: 180
+        };
+      } else if (progress < 0.67) {
+        // --- FASE 2: MALAM HARI (60 - 120s) ---
+        tPhase = (progress - 0.33) / 0.34;
+        phaseName = "Malam Hari";
+        const nightT = tPhase < 0.5 ? tPhase * 2 : (1 - tPhase) * 2;
+        skyTop = this.lerpColor({ r: 59, g: 7, b: 100 }, { r: 3, g: 7, b: 18 }, nightT);
+        skyMid = this.lerpColor({ r: 157, g: 23, b: 77 }, { r: 15, g: 23, b: 42 }, nightT);
+        skyBottom = this.lerpColor({ r: 244, g: 114, b: 182 }, { r: 30, g: 41, b: 59 }, nightT);
+        mountainColor = this.lerpColor({ r: 49, g: 16, b: 66 }, { r: 15, g: 23, b: 42 }, nightT);
+        hillColor = this.lerpColor({ r: 30, g: 60, b: 25 }, { r: 10, g: 30, b: 18 }, nightT);
+        soilLight = this.lerpColor({ r: 45, g: 35, b: 24 }, { r: 25, g: 20, b: 15 }, nightT);
+        ambientTint = { r: 30, g: 40, b: 90, a: 0.25 + nightT * 0.15 };
+        starsAlpha = 0.5 + nightT * 0.5;
+
+        // Moon in sky
+        sunMoon = {
+          type: 'moon',
+          xRatio: 0.35 + tPhase * 0.35,
+          yRatio: 0.15 + Math.sin(tPhase * Math.PI) * -0.05,
+          radius: 32,
+          glowColor: 'rgba(224, 242, 254, ',
+          glowRadius: 140
+        };
+      } else {
+        // --- FASE 3: SIANG HARI / PANEN EMAS (120 - 180s) ---
+        tPhase = (progress - 0.67) / 0.33;
+        phaseName = "Siang Hari (Panen Raya)";
+        skyTop = this.lerpColor({ r: 79, g: 70, b: 229 }, { r: 2, g: 132, b: 199 }, tPhase);
+        skyMid = this.lerpColor({ r: 147, g: 197, b: 253 }, { r: 56, g: 189, b: 248 }, tPhase);
+        skyBottom = this.lerpColor({ r: 254, g: 240, b: 138 }, { r: 224, g: 242, b: 254 }, tPhase);
+        mountainColor = this.lerpColor({ r: 67, g: 56, b: 202 }, { r: 101, g: 140, b: 163 }, tPhase);
+        hillColor = this.lerpColor({ r: 40, g: 110, b: 60 }, { r: 34, g: 197, b: 94 }, tPhase);
+        soilLight = this.lerpColor({ r: 60, g: 50, b: 35 }, { r: 92, g: 66, b: 40 }, tPhase);
+        ambientTint = { r: 255, g: 240, b: 180, a: tPhase * 0.12 };
+        starsAlpha = (1 - tPhase) * 0.3;
+
+        // Morning Sun Rising to Noon Zenith
+        sunMoon = {
+          type: 'sun',
+          xRatio: 0.25 + tPhase * 0.5,
+          yRatio: 0.35 - tPhase * 0.22,
+          radius: 44,
+          glowColor: 'rgba(255, 245, 160, ',
+          glowRadius: 240
+        };
+      }
+
+      return {
+        progress,
+        phaseName,
+        skyTop,
+        skyMid,
+        skyBottom,
+        mountainColor,
+        hillColor,
+        soilLight,
+        ambientTint,
+        starsAlpha,
+        sunMoon
+      };
+    }
+  }
+
+  // ==========================================
+  // 5. MAIN GAME ENGINE (Pure High-Performance Canvas)
+  // ==========================================
+  class GameEngine {
+    constructor() {
+      this.canvas = document.getElementById('gameCanvas');
+      this.ctx = this.canvas.getContext('2d');
+      this.currentScene = 'SPLASH'; // SPLASH -> LOADING -> MENU -> GAME -> REPORT
+      this.lastTime = performance.now();
+      
+      // Viewport & Scaling Attributes
+      this.scale = 1;
+      this.viewW = GameConfig.DESIGN_WIDTH;
+      this.viewH = GameConfig.DESIGN_HEIGHT;
+      this.offsetX = 0;
+      this.offsetY = 0;
+      this.dpr = window.devicePixelRatio || 1;
+
+      // Splash & Loading States
+      this.splashTimer = 3.0; // Tepat 3.0 detik
+      this.loadingProgress = 0;
+      this.tutorialActive = false;
+      this.tutorialStep = 0;
+      this.tutorialTimeout = null;
+
+      // Gameplay Systems Data
+      this.plots = [];
+      this.farmer = {
+        x: GameConfig.DESIGN_WIDTH / 2,
+        y: GameConfig.DESIGN_HEIGHT * 0.82,
+        targetX: GameConfig.DESIGN_WIDTH / 2,
+        targetY: GameConfig.DESIGN_HEIGHT * 0.82,
+        isWalking: false,
+        flipX: false,
+        stepCounter: 0,
+        flagWaveTimer: 0
+      };
+      this.spawnTimer = SpawnConfig.INITIAL_DELAY_SEC;
+      this.pulseTimer = 0;
+
+      // UI Button Rectangles for Instant High-Responsiveness
+      this.uiButtons = [];
+      this.activeButton = null;
+
+      this.initPlots();
+      this.initEvents();
+      this.resize();
+
+      window.addEventListener('resize', () => this.resize());
+      requestAnimationFrame((t) => this.mainLoop(t));
+    }
+
+    initPlots() {
+      const areaW = 1620;
+      const startX = (GameConfig.DESIGN_WIDTH - areaW) / 2;
+      const plotGap = 36;
+      const plotW = (areaW - plotGap * 2) / 3;
+      const plotH = 360;
+      const plotY = GameConfig.DESIGN_HEIGHT * 0.38;
+
+      this.plots = [];
+      for (let i = 0; i < 3; i++) {
+        const px = startX + i * (plotW + plotGap) + plotW / 2;
+        this.plots.push({
+          index: i,
+          x: px,
+          y: plotY,
+          width: plotW,
+          height: plotH,
+          postX: px,
+          postY: plotY - plotH / 2 - 20
+        });
+      }
+    }
+
+    resize() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      this.dpr = Math.min(window.devicePixelRatio || 1, 2.5); // Crisp High-DPI
+
+      this.canvas.width = w * this.dpr;
+      this.canvas.height = h * this.dpr;
+
+      // Adaptive Scale to fit 1080p content while extending panorama width
+      this.scale = Math.min(w / GameConfig.DESIGN_WIDTH, h / GameConfig.DESIGN_HEIGHT);
+      this.viewW = w / this.scale;
+      this.viewH = h / this.scale;
+      this.offsetX = (this.viewW - GameConfig.DESIGN_WIDTH) / 2;
+      this.offsetY = (this.viewH - GameConfig.DESIGN_HEIGHT) / 2;
+    }
+
+    // Cek apakah Petani berada di area Pondok Sawah
+    isFarmerAtPondok() {
+      const pondokX = GameConfig.DESIGN_WIDTH / 2;
+      const pondokY = GameConfig.DESIGN_HEIGHT * 0.82;
+      const dx = this.farmer.x - pondokX;
+      const dy = this.farmer.y - pondokY;
+      return Math.sqrt(dx * dx + dy * dy) <= GameConfig.PONDOK_RADIUS;
+    }
+
+    showWarning(msg) {
+      GlobalState.warningMessage = msg;
+      GlobalState.warningTimer = 2.5;
+      AudioManager.playWarning();
+    }
+
+    // ==========================================
+    // INPUT HANDLERS (Optimized Pointer Events - Prevent Double Taps)
+    // ==========================================
+    initEvents() {
+      let lastHandledTime = 0;
+
+      const handleInput = (clientX, clientY) => {
+        const now = performance.now();
+        if (now - lastHandledTime < 40) return; // Debounce 40ms untuk cegah double tap
+        lastHandledTime = now;
+
+        const rect = this.canvas.getBoundingClientRect();
+        const screenX = (clientX - rect.left);
+        const screenY = (clientY - rect.top);
+
+        // Transform to Virtual Design Coordinates
+        const vx = screenX / this.scale - this.offsetX;
+        const vy = screenY / this.scale - this.offsetY;
+
+        AudioManager.init();
+        this.handlePointerDown(vx, vy);
+      };
+
+      // Cukup gunakan pointerdown tunggal untuk Mouse + Touch modern
+      this.canvas.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        handleInput(e.clientX, e.clientY);
+      });
+    }
+
+    handlePointerDown(x, y) {
+      // 1. Cek Interaksi Tombol UI
+      for (const btn of this.uiButtons) {
+        if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+          AudioManager.playClick();
+          btn.callback();
+          return;
+        }
+      }
+
+      // 2. Interaksi Gameplay Scene (Pematang Sawah & Pondok)
+      if (this.currentScene === 'GAME' && !GlobalState.isPaused && !GlobalState.isGameOver) {
+        // Batas Pematang Sawah (Jalur Berjalan Keliling)
+        const minY = GameConfig.DESIGN_HEIGHT * 0.16;
+        const maxY = GameConfig.DESIGN_HEIGHT * 0.90;
+
+        if (y >= minY && y <= maxY) {
+          // Navigasi Karakter Petani
+          this.farmer.targetX = PhaserMathClamp(x, 80, GameConfig.DESIGN_WIDTH - 80);
+          this.farmer.targetY = PhaserMathClamp(y, minY, maxY);
+          this.farmer.isWalking = true;
+        }
+      }
+    }
+
+    // ==========================================
+    // GAMEPLAY SYSTEMS (Ropes, Flags, Birds, Spawning)
+    // ==========================================
+    shakeRope(plotIndex) {
+      if (!this.isFarmerAtPondok()) {
+        this.showWarning("Petani harus di Pondok! Tap 'KE PONDOK' terlebih dahulu.");
+        return;
+      }
+
+      AudioManager.playRopeShake();
+      GlobalState.shakeAnimations[plotIndex] = 1.0; // Memicu gelombang tali & getar kaleng
+
+      // Usir burung Biru / Merah di petak terkait
+      const targetFlocks = GlobalState.activeFlocks.filter(
+        f => f.plotIndex === plotIndex && (f.type === 'BLUE' || f.type === 'RED') && f.state === 'EATING'
+      );
+
+      targetFlocks.forEach(flock => {
+        flock.tapsDone += 1;
+        const needed = BirdConfig[flock.type].tapsRequired;
+        if (flock.tapsDone >= needed) {
+          this.repelFlock(flock);
+        }
+      });
+    }
+
+    waveFlagAtFlock(flock) {
+      if (!flock || flock.type !== 'BLACK' || flock.state !== 'EATING') return;
+
+      AudioManager.playFlagSwish();
+      this.farmer.flagWaveTimer = 0.35;
+      flock.resistance -= 1;
+
+      if (flock.resistance <= 0) {
+        this.repelFlock(flock);
+      }
+    }
+
+    repelFlock(flock) {
+      flock.state = 'FLEEING';
+      AudioManager.playBirdFly();
+      GlobalState.repelledCounts[flock.type.toLowerCase()] += flock.count;
+
+      if (this.tutorialActive) {
+        this.tutorialStep++;
+        if (this.tutorialTimeout) clearTimeout(this.tutorialTimeout);
+        this.tutorialTimeout = setTimeout(() => this.triggerTutorialStep(), 1200);
+      }
+    }
+
+    sendFarmerToPondok() {
+      this.farmer.targetX = GameConfig.DESIGN_WIDTH / 2;
+      this.farmer.targetY = GameConfig.DESIGN_HEIGHT * 0.82;
+      this.farmer.isWalking = true;
+      AudioManager.playClick();
+    }
+
+    spawnFlock(type = null, plotIdx = null, count = null, side = 'center') {
+      const pIdx = plotIdx !== null ? plotIdx : Math.floor(Math.random() * 3);
+      
+      let selectedType = type;
+      if (!selectedType) {
+        const rand = Math.random();
+        let cumulative = 0;
+        for (const item of SpawnConfig.DISTRIBUTION) {
+          cumulative += item.weight;
+          if (rand <= cumulative) {
+            selectedType = item.type;
+            break;
+          }
+        }
+      }
+
+      const conf = BirdConfig[selectedType];
+      const flCount = count !== null ? count : Math.floor(Math.random() * (conf.flockMax - conf.flockMin + 1)) + conf.flockMin;
+      const plot = this.plots[pIdx];
+
+      // Tentukan koordinat spot hinggap di petak
+      let spotX = plot.x;
+      let spotY = plot.y;
+      const sides = ['top', 'bottom', 'left', 'right', 'center'];
+      const chosenSide = side || sides[Math.floor(Math.random() * sides.length)];
+
+      if (chosenSide === 'left') spotX = plot.x - plot.width * 0.36;
+      if (chosenSide === 'right') spotX = plot.x + plot.width * 0.36;
+      if (chosenSide === 'top') spotY = plot.y - plot.height * 0.34;
+      if (chosenSide === 'bottom') spotY = plot.y + plot.height * 0.34;
+
+      const flock = {
+        id: 'flock_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        type: selectedType,
+        plotIndex: pIdx,
+        count: flCount,
+        resistance: flCount,
+        tapsDone: 0,
+        state: 'LANDING',
+        x: spotX,
+        y: -60,
+        targetX: spotX,
+        targetY: spotY,
+        landProgress: 0,
+        peckTimer: Math.random() * Math.PI
+      };
+
+      GlobalState.activeFlocks.push(flock);
+      AudioManager.playAlert();
+    }
+
+    triggerTutorialStep() {
+      if (!this.tutorialActive) return;
+
+      if (this.tutorialStep === 0) {
+        this.spawnFlock('BLUE', 0, 3, 'center');
+      } else if (this.tutorialStep === 1) {
+        this.spawnFlock('RED', 1, 4, 'top');
+      } else if (this.tutorialStep === 2) {
+        this.spawnFlock('BLACK', 2, 6, 'bottom');
+      } else {
+        this.tutorialActive = false;
+        GlobalState.warningMessage = "Tutorial Selesai! Pertahankan panen 3 menit!";
+        GlobalState.warningTimer = 3.0;
+      }
+    }
+
+    // ==========================================
+    // MAIN UPDATE LOOP
+    // ==========================================
+    mainLoop(time) {
+      const deltaSec = Math.min((time - this.lastTime) / 1000, 0.1);
+      this.lastTime = time;
+
+      this.update(deltaSec);
+      this.render();
+
+      requestAnimationFrame((t) => this.mainLoop(t));
+    }
+
+    update(dt) {
+      this.pulseTimer += dt * 4;
+
+      // 1. Splash Screen Timer
+      if (this.currentScene === 'SPLASH') {
+        this.splashTimer -= dt;
+        if (this.splashTimer <= 0) {
+          this.currentScene = 'LOADING';
+        }
+        return;
+      }
+
+      // 2. Loading Screen Progress
+      if (this.currentScene === 'LOADING') {
+        this.loadingProgress += dt * 0.8;
+        if (this.loadingProgress >= 1.0) {
+          this.currentScene = 'MENU';
+        }
+        return;
+      }
+
+      // 3. Gameplay Scene Logic
+      if (this.currentScene === 'GAME' && !GlobalState.isPaused && !GlobalState.isGameOver) {
+        // Warning Toast Timer
+        if (GlobalState.warningTimer > 0) {
+          GlobalState.warningTimer -= dt;
+        }
+
+        // Timer Countdown (3 Menit)
+        if (!this.tutorialActive) {
+          GlobalState.timeRemaining -= dt;
+          if (GlobalState.timeRemaining <= 0) {
+            GlobalState.timeRemaining = 0;
+            GlobalState.isGameOver = true;
+            GlobalState.isVictory = true;
+            this.endGame();
+            return;
+          }
+        }
+
+        // Damage Padi dari Burung yang Makan
+        GlobalState.activeFlocks.forEach(flock => {
+          if (flock.state === 'EATING') {
+            const conf = BirdConfig[flock.type];
+            const dmg = GameConfig.EAT_RATE_PER_SEC * conf.eatRateMultiplier * dt;
+            GlobalState.damagePlot(flock.plotIndex, dmg);
+          }
+        });
+
+        // Kondisi Kalah Real-Time (0 Ton)
+        if (GlobalState.getTotalRemainingTons() <= 0) {
+          GlobalState.isGameOver = true;
+          GlobalState.isVictory = false;
+          this.endGame();
+          return;
+        }
+
+        // Spawn Burung Baru secara Periodik
+        if (!this.tutorialActive) {
+          this.spawnTimer -= dt;
+          if (this.spawnTimer <= 0) {
+            this.spawnFlock();
+            const elapsed = GameConfig.GAME_DURATION_SEC - GlobalState.timeRemaining;
+            const prog = Math.min(1, elapsed / SpawnConfig.DIFFICULTY_RAMP_TIME_SEC);
+            this.spawnTimer = SpawnConfig.MAX_INTERVAL_SEC - prog * 4.5 + Math.random() * 2.5;
+          }
+        }
+
+        // Update Flocks Movement & Animations
+        GlobalState.activeFlocks.forEach(flock => {
+          flock.peckTimer += dt * 5;
+
+          if (flock.state === 'LANDING') {
+            flock.landProgress += dt * 1.5;
+            flock.y = -60 + (flock.targetY + 60) * Math.min(1, flock.landProgress);
+            if (flock.landProgress >= 1.0) {
+              flock.state = 'EATING';
+              flock.y = flock.targetY;
+            }
+          } else if (flock.state === 'FLEEING') {
+            flock.y -= dt * 380;
+            flock.x += Math.sin(flock.peckTimer) * 120 * dt;
+          }
+        });
+
+        // Hapus Burung yang Sudah Terbang Jauh
+        GlobalState.activeFlocks = GlobalState.activeFlocks.filter(f => f.y > -100);
+
+        // Update Gerakan Petani
+        const fdx = this.farmer.targetX - this.farmer.x;
+        const fdy = this.farmer.targetY - this.farmer.y;
+        const fdist = Math.sqrt(fdx * fdx + fdy * fdy);
+
+        if (fdist > 6) {
+          this.farmer.x += (fdx / fdist) * GameConfig.FARMER_SPEED * dt;
+          this.farmer.y += (fdy / fdist) * GameConfig.FARMER_SPEED * dt;
+          this.farmer.flipX = fdx < 0;
+          this.farmer.stepCounter += dt * 10;
+        } else {
+          this.farmer.isWalking = false;
+        }
+
+        if (this.farmer.flagWaveTimer > 0) {
+          this.farmer.flagWaveTimer -= dt;
+        }
+
+        // Update Animasi Gelombang Tali
+        for (let i = 0; i < 3; i++) {
+          if (GlobalState.shakeAnimations[i] > 0) {
+            GlobalState.shakeAnimations[i] -= dt * 2.2;
+            if (GlobalState.shakeAnimations[i] < 0) GlobalState.shakeAnimations[i] = 0;
+          }
+        }
+      }
+    }
+
+    endGame() {
+      AudioManager.stopBGM();
+      if (GlobalState.isVictory) {
+        AudioManager.playVictory();
+      } else {
+        AudioManager.playDefeat();
+      }
+      setTimeout(() => {
+        this.currentScene = 'REPORT';
+      }, 1000);
+    }
+
+    // ==========================================
+    // RENDERING PIPELINE (Full HD Canvas)
+    // ==========================================
+    render() {
+      // Clear Canvas Buffer
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+      this.ctx.save();
+      this.ctx.scale(this.dpr * this.scale, this.dpr * this.scale);
+      this.ctx.translate(this.offsetX, this.offsetY);
+
+      this.uiButtons = []; // Reset tombol per frame
+
+      if (this.currentScene === 'SPLASH') {
+        this.renderSplash();
+      } else if (this.currentScene === 'LOADING') {
+        this.renderLoading();
+      } else if (this.currentScene === 'MENU') {
+        this.renderMenu();
+      } else if (this.currentScene === 'GAME') {
+        this.renderGame();
+      } else if (this.currentScene === 'REPORT') {
+        this.renderReport();
+      }
+
+      this.ctx.restore();
+    }
+
+    // --- 1. SPLASH SCREEN (Tepat 3 Detik "build by ikhsan") ---
+    renderSplash() {
+      const fullLeft = -this.offsetX;
+      const fullTop = -this.offsetY;
+      const fullW = this.viewW;
+      const fullH = this.viewH;
+
+      this.ctx.fillStyle = '#0a160d';
+      this.ctx.fillRect(fullLeft, fullTop, fullW, fullH);
+
+      // Bingkai Etnik Bugis
+      this.ctx.strokeStyle = '#d4af37';
+      this.ctx.lineWidth = 3;
+      this.ctx.strokeRect(GameConfig.DESIGN_WIDTH * 0.15, GameConfig.DESIGN_HEIGHT * 0.25, GameConfig.DESIGN_WIDTH * 0.7, GameConfig.DESIGN_HEIGHT * 0.5);
+
+      // Teks Splash Otentik
+      this.ctx.fillStyle = '#fef08a';
+      this.ctx.font = 'bold 46px Cinzel, serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText('build by ikhsan', GameConfig.DESIGN_WIDTH / 2, GameConfig.DESIGN_HEIGHT / 2 - 10);
+
+      this.ctx.fillStyle = '#86efac';
+      this.ctx.font = '700 20px "Plus Jakarta Sans", sans-serif';
+      this.ctx.fillText('MADDONGI’ PROJECT', GameConfig.DESIGN_WIDTH / 2, GameConfig.DESIGN_HEIGHT / 2 + 50);
+    }
+
+    // --- 2. LOADING SCREEN ---
+    renderLoading() {
+      const fullLeft = -this.offsetX;
+      const fullTop = -this.offsetY;
+      this.ctx.fillStyle = '#0f291e';
+      this.ctx.fillRect(fullLeft, fullTop, this.viewW, this.viewH);
+
+      this.ctx.fillStyle = '#fbbf24';
+      this.ctx.font = 'bold 58px Cinzel, serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText("MADDONGI'", GameConfig.DESIGN_WIDTH / 2, GameConfig.DESIGN_HEIGHT * 0.36);
+
+      this.ctx.fillStyle = '#a7f3d0';
+      this.ctx.font = '600 22px "Plus Jakarta Sans", sans-serif';
+      this.ctx.fillText('Tradisi Menjaga Sawah Bugis-Makassar', GameConfig.DESIGN_WIDTH / 2, GameConfig.DESIGN_HEIGHT * 0.44);
+
+      // Bar Progres
+      const barW = 540, barH = 22;
+      const bx = GameConfig.DESIGN_WIDTH / 2 - barW / 2;
+      const by = GameConfig.DESIGN_HEIGHT * 0.58;
+
+      this.ctx.fillStyle = '#1e3a2f';
+      this.ctx.beginPath();
+      this.ctx.roundRect(bx, by, barW, barH, 10);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#34d399';
+      this.ctx.lineWidth = 2;
+      this.ctx.stroke();
+
+      this.ctx.fillStyle = '#f59e0b';
+      this.ctx.beginPath();
+      this.ctx.roundRect(bx + 2, by + 2, (barW - 4) * Math.min(1, this.loadingProgress), barH - 4, 8);
+      this.ctx.fill();
+
+      // Tips Bergantian
+      this.ctx.fillStyle = '#fef08a';
+      this.ctx.font = '18px "Plus Jakarta Sans", sans-serif';
+      this.ctx.fillText("Tips: Burung Hitam diusir dengan kibasan bendera di pematang!", GameConfig.DESIGN_WIDTH / 2, GameConfig.DESIGN_HEIGHT * 0.72);
+    }
+
+    // --- 3. MENU UTAMA ---
+    renderMenu() {
+      this.renderFullLandscape(180); // Tampilan Siang Cerah di Menu
+
+      this.ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      this.ctx.fillRect(-this.offsetX, -this.offsetY, this.viewW, this.viewH);
+
+      const cardW = 760, cardH = 580;
+      const cx = GameConfig.DESIGN_WIDTH / 2 - cardW / 2;
+      const cy = GameConfig.DESIGN_HEIGHT / 2 - cardH / 2;
+
+      this.ctx.fillStyle = 'rgba(15, 41, 30, 0.95)';
+      this.ctx.beginPath();
+      this.ctx.roundRect(cx, cy, cardW, cardH, 24);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#d4af37';
+      this.ctx.lineWidth = 3;
+      this.ctx.stroke();
+
+      this.ctx.fillStyle = '#fbbf24';
+      this.ctx.font = 'bold 56px Cinzel, serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText("MADDONGI'", GameConfig.DESIGN_WIDTH / 2, cy + 90);
+
+      this.ctx.fillStyle = '#a7f3d0';
+      this.ctx.font = '700 18px "Plus Jakarta Sans", sans-serif';
+      this.ctx.fillText("Jagai Paditta' Dari Serangan Burung", GameConfig.DESIGN_WIDTH / 2, cy + 130);
+
+      // Tombol Main Sekarang
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 180, cy + 180, 360, 60, "🌾 MAIN SEKARANG", "#16a34a", "#ffffff", () => {
+        GlobalState.reset();
+        this.tutorialActive = false;
+        this.currentScene = 'GAME';
+        AudioManager.startBGM();
+      });
+
+      // Tombol Cara Bermain (Tutorial)
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 180, cy + 260, 360, 60, "📖 CARA BERMAIN", "#0284c7", "#ffffff", () => {
+        GlobalState.reset();
+        this.tutorialActive = true;
+        this.tutorialStep = 0;
+        this.currentScene = 'GAME';
+        AudioManager.startBGM();
+        this.triggerTutorialStep();
+      });
+
+      // Tombol Toggle Audio
+      const audioText = AudioManager.isMuted ? "🔇 SUARA: MATI" : "🔊 SUARA: NYALA";
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 180, cy + 340, 360, 60, audioText, "#4b5563", "#ffffff", () => {
+        AudioManager.toggleMute();
+      });
+
+      // Tombol Layar Penuh
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 180, cy + 420, 360, 60, "⛶ LAYAR PENUH", "#7c3aed", "#ffffff", () => {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
+        }
+      });
+
+      this.ctx.fillStyle = '#9ca3af';
+      this.ctx.font = '14px "Plus Jakarta Sans", sans-serif';
+      this.ctx.fillText("Versi 2.3 • Offline Sempurna • Bugis-Makassar Heritage", GameConfig.DESIGN_WIDTH / 2, cy + 535);
+    }
+
+    // --- 4. GAMEPLAY SCENE ---
+    renderGame() {
+      // 1. Render Panorama Latar Belakang & Siklus Sore-Malam-Siang Mulus
+      const daylight = LightingSystem.getDaylightParameters(GlobalState.timeRemaining);
+      this.renderFullLandscape(GlobalState.timeRemaining, daylight);
+
+      // 2. Render 3 Petak Sawah & Tali Kaleng
+      this.renderRicePlots(daylight);
+
+      // 3. Render Pondok Sawah & Tali Nexus
+      this.renderPondokAndRopes(daylight);
+
+      // 4. Render Burung Aktif (Animasi Sayap & Mematuk)
+      this.renderActiveFlocks();
+
+      // 5. Render Karakter Petani & Kibasan Bendera
+      this.renderFarmer();
+
+      // 6. Ambient Lighting Tint Overlay (Malam/Sore)
+      if (daylight.ambientTint.a > 0.01) {
+        this.ctx.fillStyle = LightingSystem.colorToRgbString(daylight.ambientTint, daylight.ambientTint.a);
+        this.ctx.fillRect(-this.offsetX, -this.offsetY, this.viewW, this.viewH);
+      }
+
+      // 7. Render HUD, Tombol Interaktif, dan Warning Toast
+      this.renderHUD(daylight);
+
+      // 8. Render Pause Modal jika Diaktifkan (Bersihkan tombol melayang di belakang modal)
+      if (GlobalState.isPaused) {
+        this.renderPauseModal();
+      }
+    }
+
+    // Render Panorama Alam (Selaras Sisi Kiri & Kanan Sepanjang Viewport)
+    renderFullLandscape(timeRemaining, dl = null) {
+      const daylight = dl || LightingSystem.getDaylightParameters(timeRemaining);
+      const fullLeft = -this.offsetX;
+      const fullTop = -this.offsetY;
+      const fullW = this.viewW;
+      const fullH = this.viewH;
+
+      // 1. Sky Gradient
+      const skyGrad = this.ctx.createLinearGradient(0, fullTop, 0, GameConfig.DESIGN_HEIGHT * 0.65);
+      skyGrad.addColorStop(0, LightingSystem.colorToRgbString(daylight.skyTop));
+      skyGrad.addColorStop(0.5, LightingSystem.colorToRgbString(daylight.skyMid));
+      skyGrad.addColorStop(1, LightingSystem.colorToRgbString(daylight.skyBottom));
+      this.ctx.fillStyle = skyGrad;
+      this.ctx.fillRect(fullLeft, fullTop, fullW, fullH);
+
+      // 2. Stars at Night
+      if (daylight.starsAlpha > 0.02) {
+        this.ctx.fillStyle = `rgba(255, 255, 255, ${daylight.starsAlpha})`;
+        for (let i = 0; i < 45; i++) {
+          const sx = fullLeft + ((i * 137.5 + 40) % fullW);
+          const sy = fullTop + ((i * 83.1 + 20) % (GameConfig.DESIGN_HEIGHT * 0.45));
+          const size = (i % 3 === 0) ? 2.5 : 1.5;
+          this.ctx.fillRect(sx, sy, size, size);
+        }
+      }
+
+      // 3. Sun / Moon Celestial Body
+      const sm = daylight.sunMoon;
+      const smX = fullLeft + fullW * sm.xRatio;
+      const smY = GameConfig.DESIGN_HEIGHT * sm.yRatio;
+
+      const glowGrad = this.ctx.createRadialGradient(smX, smY, 5, smX, smY, sm.glowRadius);
+      glowGrad.addColorStop(0, sm.glowColor + '0.8)');
+      glowGrad.addColorStop(0.4, sm.glowColor + '0.25)');
+      glowGrad.addColorStop(1, sm.glowColor + '0)');
+      this.ctx.fillStyle = glowGrad;
+      this.ctx.beginPath();
+      this.ctx.arc(smX, smY, sm.glowRadius, 0, Math.PI * 2);
+      this.ctx.fill();
+
+      this.ctx.fillStyle = (sm.type === 'sun') ? '#fef08a' : '#f8fafc';
+      this.ctx.beginPath();
+      this.ctx.arc(smX, smY, sm.radius, 0, Math.PI * 2);
+      this.ctx.fill();
+
+      // 4. Distant Mountains (Gunung Bawakaraeng)
+      this.ctx.fillStyle = LightingSystem.colorToRgbString(daylight.mountainColor);
+      this.ctx.beginPath();
+      this.ctx.moveTo(fullLeft, GameConfig.DESIGN_HEIGHT * 0.52);
+      this.ctx.lineTo(fullLeft + fullW * 0.25, GameConfig.DESIGN_HEIGHT * 0.26);
+      this.ctx.lineTo(fullLeft + fullW * 0.48, GameConfig.DESIGN_HEIGHT * 0.48);
+      this.ctx.lineTo(fullLeft + fullW * 0.74, GameConfig.DESIGN_HEIGHT * 0.20);
+      this.ctx.lineTo(fullLeft + fullW * 0.90, GameConfig.DESIGN_HEIGHT * 0.44);
+      this.ctx.lineTo(fullLeft + fullW, GameConfig.DESIGN_HEIGHT * 0.36);
+      this.ctx.lineTo(fullLeft + fullW, fullH);
+      this.ctx.lineTo(fullLeft, fullH);
+      this.ctx.fill();
+
+      // 5. Mid Hills & Siluet Pepohonan Kelapa
+      this.ctx.fillStyle = LightingSystem.colorToRgbString(daylight.hillColor);
+      this.ctx.beginPath();
+      this.ctx.moveTo(fullLeft, GameConfig.DESIGN_HEIGHT * 0.58);
+      this.ctx.bezierCurveTo(fullLeft + fullW * 0.2, GameConfig.DESIGN_HEIGHT * 0.46, fullLeft + fullW * 0.5, GameConfig.DESIGN_HEIGHT * 0.56, fullLeft + fullW * 0.7, GameConfig.DESIGN_HEIGHT * 0.48);
+      this.ctx.bezierCurveTo(fullLeft + fullW * 0.85, GameConfig.DESIGN_HEIGHT * 0.42, fullLeft + fullW * 0.95, GameConfig.DESIGN_HEIGHT * 0.54, fullLeft + fullW, GameConfig.DESIGN_HEIGHT * 0.48);
+      this.ctx.lineTo(fullLeft + fullW, fullH);
+      this.ctx.lineTo(fullLeft, fullH);
+      this.ctx.fill();
+
+      // 6. Base Soil Ground (Tanah & Jalur Pematang Luas)
+      const soilGrad = this.ctx.createLinearGradient(0, GameConfig.DESIGN_HEIGHT * 0.54, 0, fullH);
+      soilGrad.addColorStop(0, LightingSystem.colorToRgbString(daylight.soilLight));
+      soilGrad.addColorStop(1, '#1b140d');
+      this.ctx.fillStyle = soilGrad;
+      this.ctx.fillRect(fullLeft, GameConfig.DESIGN_HEIGHT * 0.54, fullW, fullH);
+    }
+
+    // Render 3 Petak Padi & Tombol Tarik Tali
+    renderRicePlots(daylight) {
+      const elapsed = GameConfig.GAME_DURATION_SEC - GlobalState.timeRemaining;
+      const progress = elapsed / GameConfig.GAME_DURATION_SEC;
+      let stageIdx = 0;
+      if (progress > 0.25) stageIdx = 1;
+      if (progress > 0.55) stageIdx = 2;
+      if (progress > 0.85) stageIdx = 3;
+
+      this.plots.forEach(p => {
+        // Galengan / Pematang Bed Petak
+        this.ctx.fillStyle = '#3a2714';
+        this.ctx.beginPath();
+        this.ctx.roundRect(p.x - p.width / 2 - 12, p.y - p.height / 2 - 12, p.width + 24, p.height + 24, 18);
+        this.ctx.fill();
+        this.ctx.strokeStyle = '#5a3e20';
+        this.ctx.lineWidth = 4;
+        this.ctx.stroke();
+
+        // Air & Lumpur Sawah
+        this.ctx.fillStyle = stageIdx >= 2 ? '#243b18' : '#1e331b';
+        this.ctx.fillRect(p.x - p.width / 2, p.y - p.height / 2, p.width, p.height);
+
+        // Hitung Rasio Kesehatan Petak (Visual Kerusakan Padi saat dimakan)
+        const initTon = GameConfig.INITIAL_POTENTIAL_TONS[p.index];
+        const remainingTon = GlobalState.plotPotentials[p.index];
+        const healthRatio = Math.max(0, Math.min(1, remainingTon / initTon));
+
+        // Rumpun Padi Bergoyang & Dinamis dengan Status Tonase
+        this.renderPaddyStalks(p, stageIdx, healthRatio);
+
+        // Tiang Pancang Tali
+        this.ctx.fillStyle = '#78350f';
+        this.ctx.fillRect(p.postX - 7, p.postY - 14, 14, 32);
+        this.ctx.fillStyle = '#f59e0b';
+        this.ctx.beginPath();
+        this.ctx.arc(p.postX, p.postY - 14, 8, 0, Math.PI * 2);
+        this.ctx.fill();
+
+        // Kaleng Rombeng Bergetar
+        const shake = GlobalState.shakeAnimations[p.index];
+        const canRot = shake > 0 ? Math.sin(shake * 24) * 0.45 : 0;
+        this.renderCanClapper(p.postX, p.postY, canRot);
+
+        // Label Potensi Panen Tonase
+        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+        this.ctx.beginPath();
+        this.ctx.roundRect(p.x - 100, p.y + p.height / 2 - 42, 200, 32, 10);
+        this.ctx.fill();
+
+        this.ctx.fillStyle = remainingTon > 1.0 ? '#fde047' : '#f87171';
+        this.ctx.font = 'bold 16px "Plus Jakarta Sans", sans-serif';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText(`Petak ${p.index + 1}: ${remainingTon.toFixed(1)} Ton`, p.x, p.y + p.height / 2 - 20);
+
+        // Tombol Interaktif "TARIK TALI"
+        if (!GlobalState.isPaused) {
+          const btnW = 220, btnH = 54;
+          const btnX = p.x - btnW / 2;
+          const btnY = p.y + p.height / 2 + 28;
+
+          const isAtPondok = this.isFarmerAtPondok();
+          const btnColor = isAtPondok ? "#0284c7" : "#475569";
+
+          this.drawButton(btnX, btnY, btnW, btnH, "🔔 TARIK TALI", btnColor, "#ffffff", () => {
+            this.shakeRope(p.index);
+          });
+        }
+      });
+    }
+
+    // Render Detail Vektor Rumpun Padi Sesuai Model Gambar dengan Responsif Kerusakan
+    renderPaddyStalks(p, stage, healthRatio = 1.0) {
+      const time = performance.now() / 1000;
+
+      for (let row = 0; row < 5; row++) {
+        const ry = p.y - p.height / 2 + 50 + row * 62;
+        for (let col = 0; col < 8; col++) {
+          const rx = p.x - p.width / 2 + 35 + col * 55 + (row % 2) * 18;
+          const sway = Math.sin(time * 2.5 + (rx + ry) * 0.05) * 6;
+          this.drawRiceClump(rx, ry, sway, stage, healthRatio);
+        }
+      }
+    }
+
+    // Helper untuk Menggambar 1 Rumpun Padi (Optimized Fast Texture Render)
+    drawRiceClump(x, y, sway, stage, healthRatio = 1.0) {
+      const sprite = PaddyCache.getClumpCanvas(stage, healthRatio, sway);
+      this.ctx.drawImage(sprite, x - 75, y - 145);
+    }
+
+    // Kaleng Rombeng / Clapper
+    renderCanClapper(x, y, rot) {
+      this.ctx.save();
+      this.ctx.translate(x, y + 8);
+      this.ctx.rotate(rot);
+
+      this.ctx.fillStyle = '#94a3b8';
+      this.ctx.beginPath();
+      this.ctx.roundRect(-12, 0, 24, 30, 4);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#475569';
+      this.ctx.lineWidth = 2;
+      this.ctx.stroke();
+
+      this.ctx.restore();
+    }
+
+    // Pondok Sawah Khas Bugis, Lentera Malam, dan Tali Bergelombang
+    renderPondokAndRopes(daylight) {
+      const pondokX = GameConfig.DESIGN_WIDTH / 2;
+      const pondokY = GameConfig.DESIGN_HEIGHT * 0.82;
+
+      // 1. Tali Bergelombang Merambat ke Tiap Petak
+      this.plots.forEach(p => {
+        const shake = GlobalState.shakeAnimations[p.index];
+        this.ctx.strokeStyle = '#f59e0b';
+        this.ctx.lineWidth = 3.5;
+        this.ctx.beginPath();
+        this.ctx.moveTo(pondokX, pondokY - 40);
+
+        const midX = (pondokX + p.postX) / 2;
+        let midY = (pondokY + p.postY) / 2 + 25;
+
+        if (shake > 0) {
+          midY += Math.sin(shake * 30) * 18; // Gelombang merambat
+        }
+
+        this.ctx.quadraticCurveTo(midX, midY, p.postX, p.postY);
+        this.ctx.stroke();
+      });
+
+      // 2. Lentera Malam di Pondok (Warm Radial Lantern Glow)
+      if (daylight.starsAlpha > 0.1) {
+        const lanternGlow = this.ctx.createRadialGradient(pondokX, pondokY, 10, pondokX, pondokY, 220);
+        lanternGlow.addColorStop(0, 'rgba(251, 191, 36, 0.6)');
+        lanternGlow.addColorStop(0.5, 'rgba(245, 158, 11, 0.18)');
+        lanternGlow.addColorStop(1, 'rgba(245, 158, 11, 0)');
+        this.ctx.fillStyle = lanternGlow;
+        this.ctx.beginPath();
+        this.ctx.arc(pondokX, pondokY, 220, 0, Math.PI * 2);
+        this.ctx.fill();
+      }
+
+      // 3. Pondok Sawah Panggung Kayu Tradisional
+      this.ctx.save();
+      this.ctx.translate(pondokX, pondokY);
+
+      // Tiang Panggung
+      this.ctx.fillStyle = '#5c3a21';
+      this.ctx.fillRect(-85, -10, 14, 110);
+      this.ctx.fillRect(-35, -10, 12, 110);
+      this.ctx.fillRect(25, -10, 12, 110);
+      this.ctx.fillRect(75, -10, 14, 110);
+
+      // Lantai Panggung
+      this.ctx.fillStyle = '#8b5a2b';
+      this.ctx.fillRect(-105, -10, 210, 20);
+      this.ctx.fillStyle = '#6e431f';
+      this.ctx.fillRect(-105, 10, 210, 6);
+
+      // Pagar Bambu
+      this.ctx.fillStyle = '#c2a649';
+      this.ctx.fillRect(-100, -35, 200, 8);
+      for (let bx = -90; bx <= 90; bx += 22) {
+        this.ctx.fillRect(bx, -35, 6, 26);
+      }
+
+      // Tangga Bambu
+      this.ctx.strokeStyle = '#c2a649';
+      this.ctx.lineWidth = 4;
+      this.ctx.beginPath();
+      this.ctx.moveTo(-20, 10); this.ctx.lineTo(-40, 95);
+      this.ctx.moveTo(10, 10); this.ctx.lineTo(-10, 95);
+      for (let ty = 25; ty <= 85; ty += 18) {
+        this.ctx.moveTo(-25 - (ty - 10) * 0.22, ty);
+        this.ctx.lineTo(5 - (ty - 10) * 0.22, ty);
+      }
+      this.ctx.stroke();
+
+      // Atap Rumbia Tradisional Segitiga Bugis
+      this.ctx.fillStyle = '#785b32';
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, -120);
+      this.ctx.lineTo(-125, -35);
+      this.ctx.lineTo(125, -35);
+      this.ctx.closePath();
+      this.ctx.fill();
+
+      // Ornamen Puncak Timpa Laja
+      this.ctx.fillStyle = '#d4af37';
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, -130);
+      this.ctx.lineTo(-10, -112);
+      this.ctx.lineTo(10, -112);
+      this.ctx.closePath();
+      this.ctx.fill();
+
+      this.ctx.restore();
+
+      // Tombol "KE PONDOK"
+      if (!GlobalState.isPaused) {
+        const btnW = 260, btnH = 56;
+        const btnX = pondokX - btnW / 2;
+        const btnY = pondokY + 95;
+
+        const isAtPondok = this.isFarmerAtPondok();
+        let btnBgColor = "#16a34a";
+        if (!isAtPondok) {
+          btnBgColor = "#ea580c";
+        }
+
+        this.drawButton(btnX, btnY, btnW, btnH, isAtPondok ? "🏠 DI PONDOK" : "🏃 KE PONDOK", btnBgColor, "#ffffff", () => {
+          this.sendFarmerToPondok();
+        });
+      }
+    }
+
+    // Render Burung dengan Animasi Kepakan Sayap
+    renderActiveFlocks() {
+      GlobalState.activeFlocks.forEach(flock => {
+        const conf = BirdConfig[flock.type];
+        const isFlapping = flock.state === 'LANDING' || flock.state === 'FLEEING';
+        const flapOffset = isFlapping ? Math.sin(flock.peckTimer * 3.5) * 12 : 0;
+        const peckOffset = flock.state === 'EATING' ? Math.sin(flock.peckTimer) * 4 : 0;
+
+        for (let i = 0; i < flock.count; i++) {
+          const bx = flock.x + (i % 3 - 1) * 22;
+          const by = flock.y + Math.floor(i / 3) * 18 + (flock.state === 'EATING' ? peckOffset : 0);
+
+          this.ctx.save();
+          this.ctx.translate(bx, by);
+
+          // Badan Burung
+          this.ctx.fillStyle = conf.bodyColor;
+          this.ctx.beginPath();
+          this.ctx.ellipse(0, 0, 13, 10, 0, 0, Math.PI * 2);
+          this.ctx.fill();
+
+          // Perut Burung
+          this.ctx.fillStyle = conf.bellyColor;
+          this.ctx.beginPath();
+          this.ctx.ellipse(2, 3, 8, 5, 0, 0, Math.PI * 2);
+          this.ctx.fill();
+
+          // Kepala Burung
+          this.ctx.fillStyle = conf.bodyColor;
+          this.ctx.beginPath();
+          this.ctx.arc(8, -6, 7, 0, Math.PI * 2);
+          this.ctx.fill();
+
+          // Paruh
+          this.ctx.fillStyle = conf.beakColor;
+          this.ctx.beginPath();
+          this.ctx.moveTo(13, -8);
+          this.ctx.lineTo(20, -5);
+          this.ctx.lineTo(13, -3);
+          this.ctx.closePath();
+          this.ctx.fill();
+
+          // Sayap (Animasi Kepak)
+          this.ctx.fillStyle = conf.wingColor;
+          this.ctx.beginPath();
+          if (isFlapping) {
+            this.ctx.moveTo(-4, 0);
+            this.ctx.lineTo(-8, -14 - flapOffset);
+            this.ctx.lineTo(6, -6);
+          } else {
+            this.ctx.ellipse(-2, -1, 8, 5, -0.2, 0, Math.PI * 2);
+          }
+          this.ctx.closePath();
+          this.ctx.fill();
+
+          this.ctx.restore();
+        }
+
+        // Badge Status Tap / Kibas di Atas Kelompok Burung
+        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+        this.ctx.beginPath();
+        this.ctx.roundRect(flock.x - 55, flock.y - 38, 110, 26, 6);
+        this.ctx.fill();
+        this.ctx.strokeStyle = conf.bodyColor;
+        this.ctx.lineWidth = 2;
+        this.ctx.stroke();
+
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = 'bold 13px "Plus Jakarta Sans", sans-serif';
+        this.ctx.textAlign = 'center';
+
+        if (flock.type === 'BLUE' || flock.type === 'RED') {
+          const left = conf.tapsRequired - flock.tapsDone;
+          this.ctx.fillText(`Tarik: ${left}x`, flock.x, flock.y - 20);
+        } else {
+          this.ctx.fillText(`Kibas: ${flock.resistance}x`, flock.x, flock.y - 20);
+        }
+      });
+    }
+
+    // Render Petani, Animasi Berjalan, dan Kibasan Bendera
+    renderFarmer() {
+      const f = this.farmer;
+      const step = f.isWalking ? Math.sin(f.stepCounter) * 8 : 0;
+      const isWaving = f.flagWaveTimer > 0;
+
+      this.ctx.save();
+      this.ctx.translate(f.x, f.y);
+      if (f.flipX) this.ctx.scale(-1, 1);
+
+      // Bayangan
+      this.ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      this.ctx.beginPath();
+      this.ctx.ellipse(0, 42, 24, 8, 0, 0, Math.PI * 2);
+      this.ctx.fill();
+
+      // Kaki
+      this.ctx.strokeStyle = '#1e3a8a';
+      this.ctx.lineWidth = 6;
+      this.ctx.beginPath();
+      this.ctx.moveTo(-7, 15); this.ctx.lineTo(-7 - step, 40);
+      this.ctx.moveTo(7, 15); this.ctx.lineTo(7 + step, 40);
+      this.ctx.stroke();
+
+      // Badan Baju Petani
+      this.ctx.fillStyle = '#ea580c';
+      this.ctx.fillRect(-15, -12, 30, 28);
+
+      // Sarung Bugis di Pinggang
+      this.ctx.fillStyle = '#fbbf24';
+      this.ctx.fillRect(-16, 8, 32, 8);
+      this.ctx.fillStyle = '#92400e';
+      this.ctx.fillRect(-16, 11, 32, 2);
+
+      // Kepala
+      this.ctx.fillStyle = '#fbcfe8';
+      this.ctx.beginPath();
+      this.ctx.arc(0, -20, 11, 0, Math.PI * 2);
+      this.ctx.fill();
+
+      // Topi Caping Anyaman Bugis
+      this.ctx.fillStyle = '#ca8a04';
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, -40);
+      this.ctx.lineTo(-30, -20);
+      this.ctx.lineTo(30, -20);
+      this.ctx.closePath();
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#854d0e';
+      this.ctx.lineWidth = 2.5;
+      this.ctx.stroke();
+
+      // Tiang & Kain Bendera Pengusir Burung
+      this.ctx.strokeStyle = '#78350f';
+      this.ctx.lineWidth = 4;
+      this.ctx.beginPath();
+      if (isWaving) {
+        this.ctx.moveTo(15, 10);
+        this.ctx.lineTo(38, -48);
+        this.ctx.stroke();
+
+        // Kain Merah Berkibar Kencang
+        this.ctx.fillStyle = '#dc2626';
+        this.ctx.beginPath();
+        this.ctx.moveTo(38, -48);
+        this.ctx.quadraticCurveTo(70, -60, 60, -32);
+        this.ctx.lineTo(34, -28);
+        this.ctx.closePath();
+        this.ctx.fill();
+      } else {
+        this.ctx.moveTo(14, 25);
+        this.ctx.lineTo(18, -35);
+        this.ctx.stroke();
+
+        this.ctx.fillStyle = '#dc2626';
+        this.ctx.beginPath();
+        this.ctx.moveTo(18, -35);
+        this.ctx.lineTo(36, -25);
+        this.ctx.lineTo(18, -15);
+        this.ctx.closePath();
+        this.ctx.fill();
+      }
+
+      this.ctx.restore();
+
+      // Floating Action Button "KIBAS BENDERA" jika dekat dengan Burung Hitam
+      if (!GlobalState.isPaused) {
+        let nearbyBlackFlock = null;
+        GlobalState.activeFlocks.forEach(flock => {
+          if (flock.type === 'BLACK' && flock.state === 'EATING') {
+            const dx = f.x - flock.x;
+            const dy = f.y - flock.y;
+            if (Math.sqrt(dx * dx + dy * dy) < 180) {
+              nearbyBlackFlock = flock;
+            }
+          }
+        });
+
+        if (nearbyBlackFlock) {
+          const fBtnX = f.x + 35;
+          const fBtnY = f.y - 55;
+          this.drawButton(fBtnX, fBtnY, 150, 48, "🚩 KIBAS!", "#dc2626", "#ffffff", () => {
+            this.waveFlagAtFlock(nearbyBlackFlock);
+          });
+        }
+      }
+    }
+
+    // Render HUD Atas, Waktu, Ton Panen, Status, dan Warning Toast
+    renderHUD(daylight) {
+      const fullLeft = -this.offsetX;
+      const fullW = this.viewW;
+
+      // Banner Atas HUD
+      this.ctx.fillStyle = 'rgba(15, 41, 30, 0.92)';
+      this.ctx.fillRect(fullLeft, -this.offsetY, fullW, 72);
+      this.ctx.strokeStyle = '#d4af37';
+      this.ctx.lineWidth = 2;
+      this.ctx.beginPath();
+      this.ctx.moveTo(fullLeft, -this.offsetY + 72);
+      this.ctx.lineTo(fullLeft + fullW, -this.offsetY + 72);
+      this.ctx.stroke();
+
+      // 1. Timer Display & Fase Waktu (Kiri)
+      const mins = Math.floor(GlobalState.timeRemaining / 60);
+      const secs = Math.floor(GlobalState.timeRemaining % 60);
+      this.ctx.fillStyle = '#ffffff';
+      this.ctx.font = 'bold 20px "Plus Jakarta Sans", sans-serif';
+      this.ctx.textAlign = 'left';
+      this.ctx.fillText(`⏱ WAKTU: 0${mins}:${secs < 10 ? '0' : ''}${secs}`, 30, 44);
+
+      this.ctx.fillStyle = '#86efac';
+      this.ctx.font = '600 13px "Plus Jakarta Sans", sans-serif';
+      this.ctx.fillText(`Fase: ${daylight.phaseName}`, 190, 44);
+
+      // 2. Potensi Panen (Tengah)
+      const totalRemaining = GlobalState.getTotalRemainingTons();
+      this.ctx.fillStyle = '#fde047';
+      this.ctx.font = 'bold 22px "Plus Jakarta Sans", sans-serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText(`🌾 POTENSI PANEN: ${totalRemaining.toFixed(1)} / ${GlobalState.initialTotalTons.toFixed(1)} Ton`, GameConfig.DESIGN_WIDTH / 2, 44);
+
+      // 3. Tombol MENU / JEDA (Kanan)
+      if (!GlobalState.isPaused) {
+        this.drawButton(GameConfig.DESIGN_WIDTH - 130, 16, 100, 42, "⏸ MENU", "#374151", "#ffffff", () => {
+          GlobalState.isPaused = true;
+        });
+      }
+
+      // Warning / Notification Toast
+      if (GlobalState.warningTimer > 0) {
+        this.ctx.fillStyle = 'rgba(185, 28, 28, 0.95)';
+        this.ctx.beginPath();
+        this.ctx.roundRect(GameConfig.DESIGN_WIDTH / 2 - 280, 88, 560, 44, 12);
+        this.ctx.fill();
+        this.ctx.strokeStyle = '#fca5a5';
+        this.ctx.lineWidth = 2;
+        this.ctx.stroke();
+
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = 'bold 15px "Plus Jakarta Sans", sans-serif';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText(GlobalState.warningMessage, GameConfig.DESIGN_WIDTH / 2, 115);
+      }
+
+      // Tutorial Step Banner
+      if (this.tutorialActive && !GlobalState.isPaused) {
+        const tutMsgs = [
+          "Latihan 1: Burung Biru! Tap tombol 'TARIK TALI' 2x dari Pondok!",
+          "Latihan 2: Burung Merah! Tap tombol 'TARIK TALI' 3x dari Pondok!",
+          "Latihan 3: Burung Gagak Hitam! Tap pematang mendekat, lalu tap 'KIBAS'!"
+        ];
+        this.ctx.fillStyle = 'rgba(30, 27, 75, 0.95)';
+        this.ctx.beginPath();
+        this.ctx.roundRect(GameConfig.DESIGN_WIDTH / 2 - 340, 88, 680, 46, 12);
+        this.ctx.fill();
+        this.ctx.strokeStyle = '#818cf8';
+        this.ctx.lineWidth = 2;
+        this.ctx.stroke();
+
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = 'bold 15px "Plus Jakarta Sans", sans-serif';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText(tutMsgs[this.tutorialStep] || "Pertahankan sawah!", GameConfig.DESIGN_WIDTH / 2 - 40, 116);
+
+        this.drawButton(GameConfig.DESIGN_WIDTH / 2 + 230, 94, 90, 34, "LEWATI", "#d97706", "#ffffff", () => {
+          this.tutorialActive = false;
+          if (this.tutorialTimeout) clearTimeout(this.tutorialTimeout);
+        });
+      }
+    }
+
+    // --- 5. PAUSE MODAL (Jeda, Lanjutkan, Audio, Menu) ---
+    renderPauseModal() {
+      // Bersihkan tombol gameplay melayang agar modal menerima input bersih
+      this.uiButtons = [];
+
+      this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      this.ctx.fillRect(-this.offsetX, -this.offsetY, this.viewW, this.viewH);
+
+      const modalW = 540, modalH = 400;
+      const mx = GameConfig.DESIGN_WIDTH / 2 - modalW / 2;
+      const my = GameConfig.DESIGN_HEIGHT / 2 - modalH / 2;
+
+      this.ctx.fillStyle = '#0f291e';
+      this.ctx.beginPath();
+      this.ctx.roundRect(mx, my, modalW, modalH, 20);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#d4af37';
+      this.ctx.lineWidth = 3;
+      this.ctx.stroke();
+
+      this.ctx.fillStyle = '#fbbf24';
+      this.ctx.font = 'bold 36px Cinzel, serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText("PERMAINAN DIJEDA", GameConfig.DESIGN_WIDTH / 2, my + 65);
+
+      // Tombol Lanjutkan (Resume)
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 170, my + 110, 340, 56, "▶️ LANJUTKAN", "#16a34a", "#ffffff", () => {
+        GlobalState.isPaused = false;
+      });
+
+      // Tombol Audio Toggle
+      const audioText = AudioManager.isMuted ? "🔇 SUARA: MATI" : "🔊 SUARA: NYALA";
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 170, my + 185, 340, 56, audioText, "#4b5563", "#ffffff", () => {
+        AudioManager.toggleMute();
+      });
+
+      // Tombol Keluar ke Menu Utama
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 170, my + 260, 340, 56, "🏠 MENU UTAMA", "#b91c1c", "#ffffff", () => {
+        AudioManager.stopBGM();
+        GlobalState.isPaused = false;
+        this.currentScene = 'MENU';
+      });
+    }
+
+    // --- 6. REPORT SCENE (Laporan Akhir & Skor) ---
+    renderReport() {
+      this.renderFullLandscape(0); // Latar Siang Penuh
+
+      this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      this.ctx.fillRect(-this.offsetX, -this.offsetY, this.viewW, this.viewH);
+
+      const panelW = 820, panelH = 620;
+      const px = GameConfig.DESIGN_WIDTH / 2 - panelW / 2;
+      const py = GameConfig.DESIGN_HEIGHT / 2 - panelH / 2;
+
+      this.ctx.fillStyle = 'rgba(15, 41, 30, 0.96)';
+      this.ctx.beginPath();
+      this.ctx.roundRect(px, py, panelW, panelH, 24);
+      this.ctx.fill();
+
+      const borderCol = GlobalState.isVictory ? "#d4af37" : "#ef4444";
+      this.ctx.strokeStyle = borderCol;
+      this.ctx.lineWidth = 4;
+      this.ctx.stroke();
+
+      const title = GlobalState.isVictory ? "BERHASIL PANEN RAYA!" : "GAGAL PANEN!";
+      const titleCol = GlobalState.isVictory ? "#fbbf24" : "#f87171";
+
+      this.ctx.fillStyle = titleCol;
+      this.ctx.font = 'bold 38px Cinzel, serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText(title, GameConfig.DESIGN_WIDTH / 2, py + 65);
+
+      this.ctx.fillStyle = '#a7f3d0';
+      this.ctx.font = '600 18px "Plus Jakarta Sans", sans-serif';
+      this.ctx.fillText('Laporan Akhir Penjagaan Sawah (Maddongi’)', GameConfig.DESIGN_WIDTH / 2, py + 105);
+
+      // Data Grid Box
+      const stats = [
+        { label: '🌾 Total Padi Berhasil Dipanen:', val: `${GlobalState.getTotalRemainingTons().toFixed(1)} Ton`, color: '#86efac' },
+        { label: '🥀 Padi Dimakan Burung:', val: `${GlobalState.getTotalEatenTons().toFixed(1)} Ton`, color: '#fca5a5' },
+        { label: '🐦 Burung Pipit Biru Diusir:', val: `${GlobalState.repelledCounts.blue} Ekor`, color: '#93c5fd' },
+        { label: '🦅 Burung Kepala Merah Diusir:', val: `${GlobalState.repelledCounts.red} Ekor`, color: '#fca5a5' },
+        { label: '🪶 Burung Gagak Hitam Diusir:', val: `${GlobalState.repelledCounts.black} Ekor`, color: '#d1d5db' },
+        { label: '🏆 TOTAL SKOR AKHIR:', val: `${GlobalState.calculateFinalScore()} Poin`, color: '#fde047', bold: true }
+      ];
+
+      stats.forEach((item, idx) => {
+        const rowY = py + 160 + idx * 40;
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = item.bold ? 'bold 20px "Plus Jakarta Sans", sans-serif' : '17px "Plus Jakarta Sans", sans-serif';
+        this.ctx.textAlign = 'left';
+        this.ctx.fillText(item.label, px + 60, rowY);
+
+        this.ctx.fillStyle = item.color;
+        this.ctx.font = item.bold ? 'bold 22px "Plus Jakarta Sans", sans-serif' : 'bold 18px "Plus Jakarta Sans", sans-serif';
+        this.ctx.textAlign = 'right';
+        this.ctx.fillText(item.val, px + panelW - 60, rowY);
+      });
+
+      // Tombol Aksi Akhir
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 - 250, py + panelH - 95, 230, 54, "🔄 MAIN LAGI", "#16a34a", "#ffffff", () => {
+        GlobalState.reset();
+        this.tutorialActive = false;
+        this.currentScene = 'GAME';
+        AudioManager.startBGM();
+      });
+
+      this.drawButton(GameConfig.DESIGN_WIDTH / 2 + 20, py + panelH - 95, 230, 54, "🏠 MENU UTAMA", "#374151", "#ffffff", () => {
+        this.currentScene = 'MENU';
+      });
+    }
+
+    // Helper Factory Menggambar Tombol & Mendaftarkan Hitbox Responsif
+    drawButton(x, y, w, h, label, bgHex, textHex, callback) {
+      this.ctx.save();
+
+      // Shadow
+      this.ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      this.ctx.beginPath();
+      this.ctx.roundRect(x, y + 4, w, h, 14);
+      this.ctx.fill();
+
+      // Main Button Body
+      this.ctx.fillStyle = bgHex;
+      this.ctx.beginPath();
+      this.ctx.roundRect(x, y, w, h, 14);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#ffffff';
+      this.ctx.lineWidth = 2;
+      this.ctx.stroke();
+
+      // Label
+      this.ctx.fillStyle = textHex;
+      this.ctx.font = 'bold 18px "Plus Jakarta Sans", sans-serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'middle';
+      this.ctx.fillText(label, x + w / 2, y + h / 2);
+
+      this.ctx.restore();
+
+      // Daftarkan Hitbox dengan margin sentuhan ekstra (+15px) untuk layar sentuh
+      this.uiButtons.push({
+        x: x - 8,
+        y: y - 8,
+        w: w + 16,
+        h: h + 16,
+        callback: callback
+      });
+    }
+  }
+
+  // Helper Utility Clamp
+  function PhaserMathClamp(val, min, max) {
+    return Math.max(min, Math.min(max, val));
+  }
+
+  // ==========================================
+  // INITIALIZATION ON DOM READY
+  // ==========================================
+  window.addEventListener('load', () => {
+    window.gameInstance = new GameEngine();
+  });
+  </script>
+</body>
+</html>
